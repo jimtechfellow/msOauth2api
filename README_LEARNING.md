@@ -107,7 +107,7 @@ sequenceDiagram
 
 区分：
 - refresh_token：来自客户端输入，仅用于 Token Endpoint 换取 access_token；
-- access_token：仅在服务端内存中使用，拼入 XOAUTH2 字段，不对外返回；
+- access_token：不在 HTTP 响应中返回，但会被拼入 XOAUTH2 字段（auth=Bearer ...），作为认证数据发送给 Outlook IMAP；
 - Authorization（IMAP XOAUTH2）：`user=<email>\x01auth=Bearer <access_token>\x01\x01` 的 base64。
 
 ## 7. refresh_token 和 access_token 的区别（结合当前代码）
@@ -116,7 +116,7 @@ sequenceDiagram
 |---|---|---|
 | 用途 | 向 Token Endpoint 换取新 access_token | 作为 IMAP XOAUTH2 Bearer 凭据 |
 | 生命周期 | 长期（相对），可多次换取 | 短期（易过期） |
-| 发送给谁 | 仅发送给 Microsoft Token Endpoint | 不直接发送给外部服务（非 Graph）；仅进入 IMAP XOAUTH2 |
+| 发送给谁 | 仅发送给 Microsoft Token Endpoint | 作为 XOAUTH2 Bearer 凭据发送给 Outlook IMAP 进行认证（不经由 Graph） |
 | 是否直接访问 Graph | 否 | 本项目中也否（未实现 Graph） |
 | 泄露风险 | 更高（可持续换取新 token） | 相对较低（短期、作用受限） |
 | 在项目中的位置 | 来自 `req.query.refresh_token` | 由 `get_access_token()` 解析后赋给局部变量 |
@@ -208,7 +208,7 @@ Microsoft 重定向至 redirect_uri
 - refresh_token 无效 / Token Endpoint 返回错误：抓取 `response.text()` 并作为错误信息拼接返回（[api/mail-new.js](./api/mail-new.js) 第 17-29 行；同于其他路由）。风险：可能过度透出上游错误文本。
 - Graph 返回 401/403：无对应代码（未实现 Graph）。
 - IMAP 登录失败：`imap.once('error', ...)` 捕获并返回 500（[api/mail-new.js](./api/mail-new.js) 第 111-114 行）。
-- 邮件解析失败：`simpleParser` 的回调中 `if (err) throw err;` 会走至上层 `catch` 并返回 500。
+- 邮件解析失败：`simpleParser` 的回调中 `if (err) throw err;` 位于异步回调中；外层 `try/catch` 通常无法捕获该异常，可能成为未捕获异常并导致进程退出。
 - 网络错误 / JSON 解析错误：均在 `get_access_token` 内部被捕获并抛出，外层 500 返回。
 - 统一性：不同路由间返回结构基本一致，但错误信息多为上游文本直传，可能泄露实现细节。
 
@@ -220,6 +220,8 @@ Microsoft 重定向至 redirect_uri
 - refresh_token 通过 URL Query 传递（如 [api/mail-new.js](./api/mail-new.js) 第 38 行）；Serverless 平台的访问日志或 APM 若记录完整 URL，存在泄露风险。
 - 可能被日志记录：错误路径会将上游错误文本拼进响应（第 17-21 行与 123-126 行），若 Token 出现在上游错误文本中可能外泄（取决于上游返回内容）。
 - Token 不会出现在成功响应：成功路径仅返回邮件内容，未回传 access_token 或 refresh_token。
+- TLS 证书验证被关闭：IMAP 连接使用 `tlsOptions.rejectUnauthorized = false`（如 [api/mail-new.js](./api/mail-new.js) 第 55-58 行），关闭了证书验证，可能增加中间人攻击风险；生产环境不应保持该配置。
+- HTML 返回未进行转义：当 `response_type==='html'` 时，模板直接插入邮件发送人/主题/正文（如 [api/mail-new.js](./api/mail-new.js) 第 100-118 行），未见 HTML escaping，可能存在 HTML 注入或 XSS 风险。
 - 无身份认证与限流：任意调用者只要持有 refresh_token 即可调用接口；代码未见鉴权、频率限制。
 - 参数校验仅做存在性检查：未做格式校验（如 email 格式、mailbox 允许值在 `mail-new.js` 有使用场景，但未验证取值集合）。
 
